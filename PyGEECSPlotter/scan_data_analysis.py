@@ -406,7 +406,7 @@ class ScanDataAnalyzer:
             filename = self.data['%s file_list' %analyzer.diagnostic][i]    
 
             data = analyzer.load_data(filename)
-            data, return_dict = analyzer.analyze_data(data, bg=bg)
+            data, return_dict = analyzer.analyze_data(data, bg=bg, context = self.data.iloc[i])
             if add_data:
                 return_dict['data'] = data
 

@@ -50,7 +50,7 @@ class ImageAnalyzer:
     def load_data(self, filename):
         return ni_imread.read_imaq_image(filename).astype('float')
     
-    def analyze_data(self, data, analyzer_dict=None, bg=None):
+    def analyze_data(self, data, analyzer_dict=None, bg=None, context=None):
         if analyzer_dict is None:
             analyzer_dict = self.analyzer_dict
 
