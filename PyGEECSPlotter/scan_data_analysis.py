@@ -12,6 +12,7 @@ import json
 import datetime
 import pandas as pd
 from pathlib import Path
+from tqdm import trange
 
 from PyGEECSPlotter.navigation_utils import *
 from PyGEECSPlotter.utils import parse_controls_from_python, write_controls_from_python
@@ -255,7 +256,7 @@ class ScanDataAnalyzer:
 
         file_list = []
         file_exists = []
-        for i in range(len(self.data)):
+        for i in trange(len(self.data)):
             scan = self.data['scan'][i]
             shot_num = self.data['Shotnumber'][i]
 
@@ -285,7 +286,7 @@ class ScanDataAnalyzer:
                 n_missing = np.sum(1 - np.array(file_exists))
                 print('Removed %d lines from scan_data for missing files' %n_missing)
 
-    def filter_scan_data(self, filter_parameter, lower_bound, upper_bound, filter_exclusive=False, update_data=False):
+    def filter_scan_data(self, filter_parameter, lower_bound_or_list, upper_bound=None, filter_exclusive=False, update_data=False):
         """
         Filter scan data based on a specified parameter and value range.
 
@@ -293,7 +294,7 @@ class ScanDataAnalyzer:
 
         Parameters:
         - filter_parameter (str): The column name in `scan_data` to apply the filter on.
-        - lower_bound (float): The lower bound of the filtering range.
+        - lower_bound_or_list (float or list): The lower bound of the filtering range. Or list if upper_bound is none
         - upper_bound (float): The upper bound of the filtering range.
         - filter_exclusive (bool, optional): If True, rows with `filter_parameter` values outside the [lower_bound, upper_bound] range are included. If False, only rows with `filter_parameter` values inside this range are included. Defaults to False.
         
@@ -303,11 +304,16 @@ class ScanDataAnalyzer:
         The function supports both inclusive and exclusive filtering and provides an option to visualize the filtering impact through printed output.
         """
 
-        if filter_exclusive:
-            filter_idcs = (self.data[filter_parameter] < lower_bound) | (self.data[filter_parameter] >  upper_bound)
+        data = self.data[filter_parameter]
+        if upper_bound is None: #list mode
+            filter_idcs = np.isin(data, lower_bound_or_list)   
         else:
-            filter_idcs = (self.data[filter_parameter] > lower_bound) & (self.data[filter_parameter] <  upper_bound)
+            assert not type(lower_bound_or_list, list), "When specifying a second bound, first bound must be a float too."
+            filter_idcs = (data >= lower_bound_or_list) & (data <=  upper_bound)
 
+        if filter_exclusive:
+            filter_idcs = ~filter_idcs
+        
         filtered_scan_data = self.data.loc[filter_idcs].reset_index(drop=True)
 
         print('%d / %d shots included. Filtered based on : %s ' %(len(filtered_scan_data), len(self.data), get_parameter_alias(filter_parameter)))
@@ -400,7 +406,7 @@ class ScanDataAnalyzer:
 
         add_columns_df = None
 
-        for i in range(len(self.data)):
+        for i in trange(len(self.data)):
             scan = int(self.data['scan'][i])
             shot_num = int(self.data['Shotnumber'][i])
             filename = self.data['%s file_list' %analyzer.diagnostic][i]    
