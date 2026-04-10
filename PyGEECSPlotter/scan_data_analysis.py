@@ -544,18 +544,18 @@ class ScanDataAnalyzer:
 
         add_columns_df = None
 
-        for i in trange(len(self.data)):
-            scan = int(self.data['scan'][i])
-            shot_num = int(self.data['Shotnumber'][i])
-            filename = self.data['%s file_list' %analyzer.diagnostic][i]    
-
+        for i in range( len(self.data) ):
+            row_dict = self.data.iloc[i].to_dict()
+            scan, shot_num = row_dict['scan'], row_dict['Shotnumber']
+            filename = row_dict[f'{analyzer.diagnostic} file_list']
+            
             data = analyzer.load_data(filename)
-            data, return_dict = analyzer.analyze_data(data, bg=bg, context = self.data.iloc[i])
-            if add_data:
-                return_dict['data'] = data
-
-            add_columns_df = ScanDataAnalyzer.append_to_add_columns_df(scan, shot_num, return_dict, add_columns_df)
-
+            
+            bg_i = self._resolve_bg_for_row(analyzer, bg, row_dict)
+            data, return_dict, lineouts = analyzer.analyze_data(data, bg=bg_i, context = self.data.iloc[i])
+            
+            add_columns_df = ScanDataAnalyzer.append_to_add_columns_df( scan, shot_num, return_dict, add_columns_df )
+            
             if data is not None:
                 if display_data:
                     fig, ax = analyzer.display_data(data, return_dict=return_dict, title=os.path.basename(filename))
