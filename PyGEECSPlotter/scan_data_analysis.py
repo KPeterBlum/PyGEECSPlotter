@@ -308,7 +308,7 @@ class ScanDataAnalyzer:
         if upper_bound is None: #list mode
             filter_idcs = np.isin(data, lower_bound_or_list)   
         else:
-            assert not type(lower_bound_or_list, list), "When specifying a second bound, first bound must be a float too."
+            assert not isinstance(lower_bound_or_list, list), "When specifying a second bound, first bound must be a float too."
             filter_idcs = (data >= lower_bound_or_list) & (data <=  upper_bound)
 
         if filter_exclusive:
