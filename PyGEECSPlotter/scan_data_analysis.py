@@ -328,6 +328,7 @@ class ScanDataAnalyzer:
             filter_idcs = ~filter_idcs
         
         filtered_scan_data = self.data.loc[filter_idcs].reset_index(drop=True)
+        moved_scan_data = self.data.loc[~filter_idcs].reset_index(drop=True)
 
         print(
             '%d / %d shots included. Filtered based on : %s'
@@ -544,7 +545,7 @@ class ScanDataAnalyzer:
 
         add_columns_df = None
 
-        for i in range( len(self.data) ):
+        for i in trange( len(self.data) ):
             row_dict = self.data.iloc[i].to_dict()
             scan, shot_num = row_dict['scan'], row_dict['Shotnumber']
             filename = row_dict[f'{analyzer.diagnostic} file_list']
