@@ -8,9 +8,6 @@ import numpy as np
 from typing import Optional, Dict, Tuple  
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.signal import medfilt2d
-from scipy.ndimage import affine_transform
-from scipy.optimize import least_squares
 import imageio as imio
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="Mean of empty slice")
@@ -44,7 +41,7 @@ class WavefrontAnalyzer(ImageAnalyzer):
         # >>> wavefront-specific params
         *,
         config_file_path: Optional[str] = None,
-        start_subpupil_size: Tuple[int, int] = (20, 20),
+        start_subpupil: Tuple[int, int] = (20, 20),
         denoising_strength: float = 0.0,
         lift_on=False,
     ):
@@ -60,7 +57,7 @@ class WavefrontAnalyzer(ImageAnalyzer):
 
         # Store wavefront config even if we don't init the engine yet
         self.config_file_path = config_file_path
-        self.start_subpupil_size = start_subpupil_size
+        self.start_subpupil = start_subpupil
         self.denoising_strength = denoising_strength
         self.lift_on = lift_on
 
@@ -74,7 +71,7 @@ class WavefrontAnalyzer(ImageAnalyzer):
         if config_file_path is not None:
             self.hasoengine = wkpy.HasoEngine(config_file_path=config_file_path)
             self.hasoengine.set_preferences(
-                wkpy.uint2D(*start_subpupil_size),
+                wkpy.uint2D(*start_subpupil),
                 denoising_strength,
                 False,
             )
@@ -97,6 +94,9 @@ class WavefrontAnalyzer(ImageAnalyzer):
     # Public pipeline method
     # -------------------------------------------------------------------
     def load_data(self, filename):
+        if not os.path.exists( filename ):
+            return None
+
         file_ext = os.path.splitext(filename)[-1]
         if 'himg' in file_ext:
             try:
@@ -117,7 +117,9 @@ class WavefrontAnalyzer(ImageAnalyzer):
             scale_max = float(lines[2].split(' ')[2])
 
             return data * (scale_max - scale_min) / (2**16 - 1) + scale_min
-        else:
+        elif 'npy' in file_ext:
+            return np.load( filename )
+        else: 
             return None
 
     def load_raw_data(self, filename):
@@ -129,7 +131,14 @@ class WavefrontAnalyzer(ImageAnalyzer):
             return None
 
 
-    def analyze_data(self, data, analyzer_dict={}, bg=None):
+    def analyze_data(self, data, analyzer_dict=None, row_dict={}, bg=None):
+        if analyzer_dict is None:
+            analyzer_dict = self.analyzer_dict
+
+        if data is None:
+            print("Warning: analyze_data() called with None input — skipping analysis.")
+            return None, {}, {}
+
         if 'himg' in self.file_ext:
             if bg is not None:
                 slopes = wkpy.SlopesPostProcessor.apply_substractor(data, bg)
@@ -162,41 +171,40 @@ class WavefrontAnalyzer(ImageAnalyzer):
                 data = self.remove_outliers(data, threshold=3)
                 results.update( self.compute_phase_shifts(data, shifts_when='outliers removed') )
 
-        return data, results
-        
-    def write_analyzed_data(self, bin_filepath, data, nan_value=0):
-        """
-        Write a 2D NumPy array to a binary PNG image and create a scaling information text file.
-        
-        Parameters:
-        - bin_filepath (str): The base file path for the PNG image and scaling text file.
-        - data (numpy.ndarray): The input 2D array to be saved.
-        - nan_value (float, optional): The scalar value to replace NaN values with. Default is 0.
-        
-        Returns:
-        - None
-        
-        The function scales the input data to fit within a 16-bit range (0-65535) and saves it as a binary PNG image. 
-        The scaling factors (min and max) used for scaling are saved in a text file with the same name.
-        """
-        
-        np.save(bin_filepath + '.npy', data, allow_pickle=True, fix_imports=True)
+        return data, results, {}
 
-        # Replace NaN values with the specified scalar
-        data = np.nan_to_num(data, nan=nan_value)
-    
-        # Calculate the scaling factors
-        data_int = (65535 * ((data - np.min(data)) / np.ptp(data))).astype(np.uint16)
-    
-        # Create scaling information lines
-        lines = ['[Scaling]', 'min = %f' % np.min(data), 'max = %f' % np.max(data)]
-    
-        # Write scaling information to a text file
-        with open(bin_filepath + '.txt', 'w') as f:
-            f.write('\n'.join(lines))
-    
-        # Save the scaled data as a binary PNG image
-        imio.imwrite(bin_filepath + '.png', data_int)
+    def average_file_list(self, file_list):
+        slopes_list = []
+        for filename in file_list:
+            data = self.load_data(filename)
+            if data is not None:
+                slopes_list.append(data)
+            else:
+                print(f"Skipping {filename} (load failed)")
+
+        # Check that we have at least one valid slope
+        if not slopes_list:
+            print("No valid slopes found. Returning None.")
+            return None
+
+        # Initialize average with the first valid slope
+        avg_slopes = slopes_list[0]
+
+        # Add the rest
+        for slopes in slopes_list[1:]:
+            avg_slopes = wkpy.SlopesPostProcessor.apply_adder(avg_slopes, slopes)
+
+        # Scale by the number of valid slopes
+        n_valid = len(slopes_list)
+        avg_slopes = wkpy.SlopesPostProcessor.apply_scaler(avg_slopes, 1 / n_valid)
+
+        return avg_slopes
+
+
+    def average_scan_data(self, scan_data):
+        file_list = list(scan_data.data[f'{self.diagnostic} file_list'])
+        return self.average_file_list(file_list)
+        
     
 
     # -------------------------------------------------------------------
@@ -215,10 +223,141 @@ class WavefrontAnalyzer(ImageAnalyzer):
                 f'ptp shift {shifts_when}': ptp,
                 f'rms shift {shifts_when}': rms,
                }
+    
     @staticmethod
     def intensity_reconstruction(hasoslopes):
         return hasoslopes.get_intensity()
 
     @staticmethod
-    def subtract_slopesdata(data1, data2):
-        return wkpy.SlopesPostProcessor.apply_substractor(data1, data2)
+    def subtract_slopes_reference(data, bg=None):
+        try:
+            return wkpy.SlopesPostProcessor.apply_substractor(data, bg) if bg is not None else data
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_wavekit_recoverable_exception(exc: Exception) -> bool:
+        """
+        Classify WaveKit exceptions that should NOT crash analysis.
+        We treat these as 'bad shot / insufficient data' and skip gracefully.
+        """
+        msg = str(exc)
+        # WaveKit sometimes nests exceptions like: Exception('io_wavekit_compute : ', Exception('IO_Error', b'...'))
+        # so we match substrings that appear in either the outer or inner string repr.
+        patterns = [
+            "bad_pupil_error",
+            "All subapertures are off",
+            "modal_projection_error",
+            "Not enough lit subapertures",
+            "not enough lit subapertures",
+            "IO_Error",
+        ]
+        return any(p in msg for p in patterns)
+
+    # -------------------------------------------------------------------
+    # Utility methods (can be overridden or extended in subclasses)
+    # -------------------------------------------------------------------
+
+    def zernike_reconstruction(self, 
+                               hasoslopes, 
+                               hasodata,
+                               pupil_center,
+                               pupil_radius,
+                               nb_modes=32,
+                               coefs_to_filter=[],
+                               phasemap_aberration_filter=[1,1,1,1,1],
+                               nan_to_zero=False
+                              ):
+        
+        modal_coef = wkpy.ModalCoef(modal_type = wkpy.E_MODAL.ZERNIKE)
+        modal_coef.set_zernike_prefs(
+            wkpy.E_ZERNIKE_NORM.STD,
+            nb_modes,
+            coefs_to_filter,
+            wkpy.ZernikePupil_t(
+                pupil_center,
+                pupil_radius
+                ),
+        )
+
+        wkpy.Compute.coef_from_hasodata(self.compute_phase_set_zernike, hasodata, modal_coef)
+
+        size = modal_coef.get_dim()
+        data_coeffs, data_indexes, pupil = modal_coef.get_data()
+
+        phase = wkpy.Phase(
+                hasoslopes=hasoslopes,  # Pass the HasoSlopes object
+                type_=2,                # Set type_ to 2 for Zernike reconstruction
+                filter_=phasemap_aberration_filter,        # Aberration filter list
+                nb_coeffs=nb_modes     # Number of Zernike coefficients
+            )
+        data, pupil = phase.get_data()
+        if nan_to_zero:
+            data[np.isnan(data)] = 0.0
+
+        zernike_dict = {f'zernike_{index}': coeff for index, coeff in zip(data_indexes, data_coeffs)}
+
+        names = ['tilt_0', 'tilt_90', 'focus', 'astig_0', 'astig_45', 'coma_0', 'coma_90', 'spherical', 'trefoil_0', 'trefoil_90',
+                '5th_astig_0', '5th_astig_45', '5th_coma_0', '5th_coma_90', '5th_spherical', 'tetrafoil_0', 'tetrafoil_45']
+        named_indexes = list(range(1, len(names) + 1))
+
+        zernike_dict = {
+            (f'zernike_{i:02d}_{names[i - 1]} (um)' if i in named_indexes else f'zernike_{i:02d} (um)'): coeff
+            for i, coeff in zip(data_indexes, data_coeffs)
+        }
+
+        zernike_phase_statistics = WavefrontAnalyzer.compute_phase_shifts( data, shifts_when='zernike' )
+        
+        return data, pupil, zernike_dict, zernike_phase_statistics
+
+    def zonal_reconstruction(self, hasodata, phasemap_aberration_filter=[1, 1, 1], nan_to_zero=False):
+        self.compute_phase_set_zonal.set_zonal_filter(phasemap_aberration_filter)
+        phase = wkpy.Compute.phase_zonal(compute_phase_set=self.compute_phase_set_zonal, hasodata=hasodata)
+        data, pupil = phase.get_data()
+        if nan_to_zero:
+            data[np.isnan(data)] = 0.0
+        zonal_phase_statistics = {
+            'zonal_phase_rms (um)' : phase.get_statistics().rms,
+            'zonal_phase_pv (um)' : phase.get_statistics().pv,
+            'zonal_phase_max (um)' : phase.get_statistics().max,
+            'zonal_phase_min (um)' : phase.get_statistics().min,
+        }
+        return data, pupil, zonal_phase_statistics
+    
+    @staticmethod
+    def get_pupil(hasoslopes):
+        pupil = wkpy.Pupil(hasoslopes = hasoslopes)
+        center, radius = wkpy.ComputePupil.fit_zernike_pupil(
+            pupil,
+            wkpy.E_PUPIL_DETECTION.AUTOMATIC,
+            wkpy.E_PUPIL_COVERING.INSCRIBED,
+            False)
+
+        pupil_dict = {
+            'pupil_center_x' : center.X,
+            'pupil_center_y' : center.Y,
+            'pupil_radius' : radius,
+        }
+        
+        return pupil, pupil_dict
+
+    @staticmethod
+    def slopes_geometric_properties(hasoslopes):
+        properties = hasoslopes.get_geometric_properties()
+        geometric_properties = {
+            'geometric_tilt_x (mrad)' : properties[0], 
+            'geometric_tilt_y (mrad)': properties[1],
+            'geometric_radius (mm)' : properties[2],
+            'geometric_focus_x_pos (mm)' : properties[3],
+            'geometric_focus_y_pos (mm)' : properties[4],
+            'geometric_astig_angle (rad)' : properties[5],
+            'geometric_sagittal (mm)' : properties[6],
+            'geometric_tangential (mm)' : properties[7],
+            'geometric_curvature (per m)' : 1.0/(properties[2]*1e-3)
+        }
+        return geometric_properties
+
+
+    
+
+

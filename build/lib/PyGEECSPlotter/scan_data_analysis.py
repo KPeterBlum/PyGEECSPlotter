@@ -6,6 +6,7 @@
 
 import numpy as np
 import os, sys
+import matplotlib.pyplot as plt
 import re
 import glob
 import json
@@ -15,10 +16,12 @@ from pathlib import Path
 
 from PyGEECSPlotter.navigation_utils import *
 from PyGEECSPlotter.utils import parse_controls_from_python, write_controls_from_python
-from PyGEECSPlotter.navigation_utils import get_analysis_dir, get_analysis_diagnostic_path, open_directory_in_explorer
+# from PyGEECSPlotter.navigation_utils import get_analysis_dir, get_analysis_diagnostic_path, open_directory_in_explorer, get_analysed_shot_save_path
 
 import PyGEECSPlotter.plotting as gplt
 colors = gplt.configure_plotting()
+
+
 
 class ScanDataAnalyzer:
     def __init__(self, 
@@ -30,6 +33,7 @@ class ScanDataAnalyzer:
                  day=None, 
                  scan=None
                  ):
+                 
         
         self.sfilename = sfilename
         self.top_dir = top_dir
@@ -55,6 +59,7 @@ class ScanDataAnalyzer:
         self.analysis_dir = None
         self.data_columns = None
         self.data = None
+        self.filtered_out_data = None
         self.aborted = False
         self.print_data = False
 
@@ -118,7 +123,9 @@ class ScanDataAnalyzer:
             
             if analyzer is not None:
                 self.add_file_list_to_scan_data(analyzer.diagnostic, analyzer.file_ext, remove_missing_diagnostic_files)
-            self.set_analysis_dir()     
+            self.set_analysis_dir()
+
+            self.filtered_out_data = pd.DataFrame(columns=self.data.columns)
 
     def get_data_columns(self):
         if self.data is not None:
@@ -285,37 +292,185 @@ class ScanDataAnalyzer:
                 n_missing = np.sum(1 - np.array(file_exists))
                 print('Removed %d lines from scan_data for missing files' %n_missing)
 
-    def filter_scan_data(self, filter_parameter, lower_bound, upper_bound, filter_exclusive=False, update_data=False):
+    def filter_scan_data(self, filter_parameter, lower_bound, upper_bound,
+                        filter_exclusive=False, update_data=False):
         """
         Filter scan data based on a specified parameter and value range.
 
-        This function filters rows in a DataFrame based on whether the values of a specified parameter fall within (inclusive or exclusive) a given range. Optionally, it can print the count of rows that were included after filtering relative to the total count.
+        Instead of discarding excluded rows, this function moves them into
+        `self.filtered_out_data`, which acts as a holding DataFrame for filtered-out data.
 
-        Parameters:
-        - filter_parameter (str): The column name in `scan_data` to apply the filter on.
-        - lower_bound (float): The lower bound of the filtering range.
-        - upper_bound (float): The upper bound of the filtering range.
-        - filter_exclusive (bool, optional): If True, rows with `filter_parameter` values outside the [lower_bound, upper_bound] range are included. If False, only rows with `filter_parameter` values inside this range are included. Defaults to False.
-        
-        Returns:
-        - filtered_scan_data (pd.DataFrame): A DataFrame containing only the rows that meet the filtering criteria.
+        Parameters
+        ----------
+        filter_parameter : str
+            Column name in `self.data` to apply the filter on.
+        lower_bound : float
+            Lower bound of filtering range.
+        upper_bound : float
+            Upper bound of filtering range.
+        filter_exclusive : bool, optional
+            If True, keep rows outside the range and move rows inside the range
+            to `self.filtered_out_data`.
+            If False, keep rows inside the range and move rows outside the range
+            to `self.filtered_out_data`.
+        update_data : bool, optional
+            If True, update `self.data` in place. Defaults to False.
 
-        The function supports both inclusive and exclusive filtering and provides an option to visualize the filtering impact through printed output.
+        Returns
+        -------
+        filtered_scan_data : pd.DataFrame
+            The rows kept after filtering.
+        moved_scan_data : pd.DataFrame
+            The rows moved into `self.filtered_out_data`.
         """
 
+        if not hasattr(self, 'filtered_out_data') or self.filtered_out_data is None:
+            self.filtered_out_data = pd.DataFrame(columns=self.data.columns)
+
         if filter_exclusive:
-            filter_idcs = (self.data[filter_parameter] < lower_bound) | (self.data[filter_parameter] >  upper_bound)
+            keep_idcs = (
+                (self.data[filter_parameter] < lower_bound) |
+                (self.data[filter_parameter] > upper_bound)
+            )
         else:
-            filter_idcs = (self.data[filter_parameter] > lower_bound) & (self.data[filter_parameter] <  upper_bound)
+            keep_idcs = (
+                (self.data[filter_parameter] > lower_bound) &
+                (self.data[filter_parameter] < upper_bound)
+            )
 
-        filtered_scan_data = self.data.loc[filter_idcs].reset_index(drop=True)
+        filtered_scan_data = self.data.loc[keep_idcs].copy().reset_index(drop=True)
+        moved_scan_data = self.data.loc[~keep_idcs].copy().reset_index(drop=True)
 
-        print('%d / %d shots included. Filtered based on : %s ' %(len(filtered_scan_data), len(self.data), get_parameter_alias(filter_parameter)))
+        print(
+            '%d / %d shots included. Filtered based on : %s'
+            % (len(filtered_scan_data), len(self.data), get_parameter_alias(filter_parameter))
+        )
 
         if update_data:
+            if not moved_scan_data.empty:
+                self.filtered_out_data = pd.concat(
+                    [self.filtered_out_data, moved_scan_data],
+                    ignore_index=True
+                )
+
             self.data = filtered_scan_data
 
-        return filtered_scan_data
+        return filtered_scan_data, moved_scan_data
+
+
+    def reset_filters(self):
+        """
+        Move all previously filtered-out rows from `self.filtered_out_data`
+        back into `self.data`, then empty `self.filtered_out_data`.
+
+        Memory-efficient version: avoids copies and intermediate column expansion.
+        """
+
+        if (
+            not hasattr(self, 'filtered_out_data') or
+            self.filtered_out_data is None or
+            self.filtered_out_data.empty
+        ):
+            sort_cols = [col for col in ['scan', 'Shotnumber'] if col in self.data.columns]
+            if sort_cols:
+                self.data = self.data.sort_values(by=sort_cols).reset_index(drop=True)
+            return self.data
+
+        # Use pd.concat directly — it handles mismatched columns natively
+        # by filling missing values with NaN, without needing to pre-expand
+        # columns on either dataframe.
+        # 
+        # We do NOT call .copy() — concat already produces a new dataframe.
+        self.data = pd.concat(
+            [self.data, self.filtered_out_data],
+            ignore_index=True,
+            sort=False,  # preserve column order from self.data
+        )
+
+        # Reorder columns: self.data columns first (already guaranteed by sort=False
+        # in concat when self.data is the first argument), but let's be explicit
+        # to also ensure any filtered_out_data-only columns appear at the end.
+        # This is already the default behavior of concat with sort=False, so
+        # no additional reindex step is needed.
+
+        # Sort if possible
+        sort_cols = [col for col in ['scan', 'Shotnumber'] if col in self.data.columns]
+        if sort_cols:
+            self.data = self.data.sort_values(by=sort_cols).reset_index(drop=True)
+
+        # Empty filtered_out_data, preserving the final column structure
+        self.filtered_out_data = self.data.iloc[0:0].copy()
+
+        return self.data
+
+    def filter_scan_data_by_array(
+            self,
+            filter_parameter,
+            values,
+            filter_exclusive=False,
+            update_data=False
+        ):
+        """
+        Filter scan data based on whether a parameter value is in a given array.
+
+        Instead of discarding excluded rows, this function moves them into
+        `self.filtered_out_data`.
+
+        Parameters
+        ----------
+        filter_parameter : str
+            Column name in `self.data` to filter on.
+        values : array-like
+            List, numpy array, or pandas Series of allowed values.
+        filter_exclusive : bool, optional
+            If True, keep rows whose values are NOT in `values`, and move rows
+            whose values ARE in `values` to `self.filtered_out_data`.
+            If False, keep only rows whose values ARE in `values`, and move rows
+            whose values are NOT in `values` to `self.filtered_out_data`.
+        update_data : bool, optional
+            If True, update `self.data` in place.
+
+        Returns
+        -------
+        filtered_scan_data : pd.DataFrame
+            The rows kept after filtering.
+        moved_scan_data : pd.DataFrame
+            The rows moved into `self.filtered_out_data`.
+        """
+
+        if not hasattr(self, 'filtered_out_data') or self.filtered_out_data is None:
+            self.filtered_out_data = pd.DataFrame(columns=self.data.columns)
+
+        # Ensure array-like input
+        values = np.asarray(values)
+
+        if filter_exclusive:
+            keep_idcs = ~self.data[filter_parameter].isin(values)
+        else:
+            keep_idcs = self.data[filter_parameter].isin(values)
+
+        filtered_scan_data = self.data.loc[keep_idcs].copy().reset_index(drop=True)
+        moved_scan_data = self.data.loc[~keep_idcs].copy().reset_index(drop=True)
+
+        print(
+            '%d / %d shots included. Filtered based on : %s'
+            % (
+                len(filtered_scan_data),
+                len(self.data),
+                get_parameter_alias(filter_parameter)
+            )
+        )
+
+        if update_data:
+            if not moved_scan_data.empty:
+                self.filtered_out_data = pd.concat(
+                    [self.filtered_out_data, moved_scan_data],
+                    ignore_index=True
+                )
+
+            self.data = filtered_scan_data
+
+        return filtered_scan_data, moved_scan_data
 
     def get_bg_file_path(self, diagnostic, file_ext='.png', which_scan='last'):
         """
@@ -386,7 +541,8 @@ class ScanDataAnalyzer:
         overwrite_columns=True, 
         analysis_label='',
         write_analyzed=False,
-        add_data=False,
+        write_lineouts=False,
+        close_displayed=True,
         ):
         """
         Processes scan data with analysis and optional display and file writing.
@@ -400,44 +556,55 @@ class ScanDataAnalyzer:
 
         add_columns_df = None
 
-        for i in range(len(self.data)):
-            scan = int(self.data['scan'][i])
-            shot_num = int(self.data['Shotnumber'][i])
-            filename = self.data['%s file_list' %analyzer.diagnostic][i]    
-
+        for i in range( len(self.data) ):
+            row_dict = self.data.iloc[i].to_dict()
+            scan, shot_num = row_dict['scan'], row_dict['Shotnumber']
+            filename = row_dict[f'{analyzer.diagnostic} file_list']
+            
             data = analyzer.load_data(filename)
-            data, return_dict = analyzer.analyze_data(data, bg=bg)
-            if add_data:
-                return_dict['data'] = data
-
-            add_columns_df = ScanDataAnalyzer.append_to_add_columns_df(scan, shot_num, return_dict, add_columns_df)
-
+            
+            bg_i = self._resolve_bg_for_row(analyzer, bg, row_dict)
+            data, return_dict, lineouts = analyzer.analyze_data(data, bg=bg_i, row_dict=row_dict)
+            
+            add_columns_df = ScanDataAnalyzer.append_to_add_columns_df( scan, shot_num, return_dict, add_columns_df )
+            
             if data is not None:
                 if display_data:
-                    fig, ax = analyzer.display_data(data, title=os.path.basename(filename))
-
+                    fig, ax = analyzer.display_data(data, return_dict=return_dict, title=os.path.basename(filename))
+            
                 if write_analyzed:
-                    analysis_dir = get_analysis_dir(self.top_dir, self.scan, make_dir=True)
-                    save_path = get_analysed_shot_save_path(analysis_dir, analyzer.output_diagnostic, scan, shot_num, analyzer.output_file_ext)
-                    analyzer.write_analyzed_data(save_path, data)
-                
+                    analysis_dir = self.get_scan_data_analysis_dir( make_dir=True )
+                    analyzer.write_analyzed_data( data, analysis_dir, scan, shot_num )
+
+                    if write_lineouts:
+                        analyzer.write_analyzed_lineouts( lineouts, analysis_dir, scan, shot_num )
+            
+                    if display_data:
+                        analyzer.write_displayed_data( fig, analysis_dir, scan, shot_num )
+
+                if close_displayed and display_data:
+                    plt.close( fig )
+
         if write_columns_to_sfile and len(self.data) > 0:
             if analyzer.output_diagnostic is not None:
                 diag_str = analyzer.output_diagnostic
             else:
                 diag_str = analyzer.diagnostic
 
-            analysis_dir = get_analysis_dir(self.top_dir, self.scan, make_dir=True)
+            analysis_dir = self.get_scan_data_analysis_dir( make_dir=True )
             controls_path = os.path.join(analysis_dir, '%s analyzer_controls %s.txt' % (diag_str, analysis_label) )
             write_controls_from_python(controls_path, analyzer.analyzer_dict)
 
             self.merge_data_frame_to_sfile(add_columns_df, 
-                              diag_str,
-                              overwrite_columns=overwrite_columns, 
-                              analysis_label=analysis_label, 
-                                          )
+                            diag_str,
+                            overwrite_columns=overwrite_columns, 
+                            analysis_label=analysis_label, 
+                                        )
 
         return add_columns_df
+    
+    def get_scan_data_analysis_dir( self, make_dir=True ):
+        return get_analysis_dir(self.top_dir, self.scan, make_dir=True)
 
     def merge_data_frame_to_sfile(self, 
                                   add_columns_df, 
@@ -494,6 +661,125 @@ class ScanDataAnalyzer:
         add_columns_df.to_csv( add_columns_path , index=False, sep='\t' )
         merged_df.to_csv(self.sfilename, index=False, sep='\t')
         print(f'Columns added to {self.sfilename}')
+
+    def analyze_scan_data_mean_std(
+            self,
+            analyzer,
+            bg=None,
+            ignore_none=True,
+            ddof=0,
+        ):
+        """
+        Analyze all shots in self.data and return the mean and standard deviation
+        of the `data` returned by analyzer.analyze_data.
+
+        Parameters
+        ----------
+        analyzer : object
+            Analyzer object with load_data and analyze_data methods.
+        bg : optional
+            Background data or parameters for the analysis.
+        ddof : int, optional
+            Delta degrees of freedom for the standard deviation.
+            Use ddof=0 for population std, ddof=1 for sample std.
+
+        Returns
+        -------
+        mean_data : np.ndarray
+            Pixelwise mean of analyzed data over all valid shots.
+        std_data : np.ndarray
+            Pixelwise standard deviation of analyzed data over all valid shots.
+
+        Notes
+        -----
+        - All returned `data` arrays must have the same shape.
+        - This function does not display data or write output files.
+        - This function ignores `return_dict` and `lineouts`; it is only for
+        aggregating the main analyzed `data`.
+        """
+
+        data_list = []
+
+        for i in range(len(self.data)):
+            row_dict = self.data.iloc[i].to_dict()
+            filename = row_dict[f'{analyzer.diagnostic} file_list']
+
+            data = analyzer.load_data(filename)
+
+            bg_i = self._resolve_bg_for_row(analyzer, bg, row_dict)
+            data, return_dict, lineouts = analyzer.analyze_data(
+                data,
+                bg=bg_i,
+                row_dict=row_dict
+            )
+
+            if data is not None:
+                data_list.append(np.asarray(data))
+
+        if len(data_list) == 0:
+            raise ValueError("No valid analyzed data found in self.data")
+
+        first_shape = data_list[0].shape
+        for i, arr in enumerate(data_list):
+            if arr.shape != first_shape:
+                raise ValueError(
+                    f"Analyzed data shape mismatch: shot 0 has shape {first_shape}, "
+                    f"but shot {i} has shape {arr.shape}"
+                )
+
+        data_stack = np.stack(data_list, axis=0)
+        mean_data = np.nanmean(data_stack, axis=0)
+        std_data = np.nanstd(data_stack, axis=0, ddof=ddof)
+
+        return mean_data, std_data
+
+    @staticmethod
+    def _resolve_bg_for_row(analyzer, bg, row_dict, debug_bg=False, debug_once=True):
+        """
+        This function is used when the bg is not the same for every shot in the scan.
+        If bg is a function that takes the argument (row_dict), it will return the bg for that row dict.
+        You just need to write the function that selects the correct bg for that shot
+
+        bg can be:
+        - None
+        - already-loaded background (returned as-is)
+        - a path/filename (loaded via analyzer.load_data)
+        - a callable: bg(row_dict) -> None | loaded_bg | path
+        - an object with .get(row_dict) -> None | loaded_bg | path
+        """
+
+        if bg is None:
+            return None
+
+        # Provider object with .get(row_dict)
+        if hasattr(bg, "get") and callable(bg.get):
+            bg_spec = bg.get(row_dict)
+
+        # Callable provider
+        elif callable(bg):
+            bg_spec = bg(row_dict)
+
+        # Static
+        else:
+            bg_spec = bg
+
+        if bg_spec is None:
+            return None
+
+        # If it's a path-like, load it
+        if isinstance(bg_spec, (str, Path, os.PathLike)):
+            bg_path = str(bg_spec)
+
+            if debug_bg:
+                # Use an attribute on analyzer to remember if we've printed already
+                if (not debug_once) or (not getattr(analyzer, "_bg_debug_printed", False)):
+                    print(f"[BG] loading background from: {bg_path}")
+                    analyzer._bg_debug_printed = True
+
+            return analyzer.load_data(bg_path)
+
+        # Otherwise assume it's already loaded bg data
+        return bg_spec
 
     def scan_data_mean_std_per_bin(self):
         """

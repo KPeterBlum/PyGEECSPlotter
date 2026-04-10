@@ -11,7 +11,7 @@ import ctypes
 
 from PyGEECSPlotter.wavefront_analysis import WavefrontAnalyzer
 from PyGEECSPlotter.utils import super_gaussian, merge_dicts_overwrite, get_lineout_width
-
+from PyGEECSPlotter.navigation_utils import get_analysed_shot_save_path
 
 class LongitudinalHTTAnalyzerHimg(WavefrontAnalyzer):
     """
@@ -32,7 +32,7 @@ class LongitudinalHTTAnalyzerHimg(WavefrontAnalyzer):
         # >>> wavefront-specific params
         *,
         config_file_path: Optional[str] = None,
-        start_subpupil_size: Tuple[int, int] = (20, 20),
+        start_subpupil: Tuple[int, int] = (20, 20),
         denoising_strength: float = 0.0,
         lift_on=False,
     ):
@@ -45,51 +45,20 @@ class LongitudinalHTTAnalyzerHimg(WavefrontAnalyzer):
             output_diagnostic=output_diagnostic,
             output_file_ext=output_file_ext,
             config_file_path=config_file_path,
-            start_subpupil_size=start_subpupil_size,
+            start_subpupil=start_subpupil,
             denoising_strength=denoising_strength,
             lift_on=lift_on,
         )
-
-    def average_file_list(self, file_list):
-        slopes_list = []
-        for filename in file_list:
-            data = self.load_data(filename)
-            if data is not None:
-                slopes_list.append(data)
-            else:
-                print(f"Skipping {filename} (load failed)")
-
-        # Check that we have at least one valid slope
-        if not slopes_list:
-            print("No valid slopes found. Returning None.")
-            return None
-
-        # Initialize average with the first valid slope
-        avg_slopes = slopes_list[0]
-
-        # Add the rest
-        for slopes in slopes_list[1:]:
-            avg_slopes = wkpy.SlopesPostProcessor.apply_adder(avg_slopes, slopes)
-
-        # Scale by the number of valid slopes
-        n_valid = len(slopes_list)
-        avg_slopes = wkpy.SlopesPostProcessor.apply_scaler(avg_slopes, 1 / n_valid)
-
-        return avg_slopes
-
-
-    def average_scan_data(self, scan_data):
-        file_list = list(scan_data.data[f'{self.diagnostic} file_list'])
-        return self.average_file_list(file_list)
     
-    def analyze_data(self, data, analyzer_dict=None, bg=None):
+    def analyze_data(self, data, analyzer_dict=None, row_dict=None, bg=None):
         if analyzer_dict is None:
             analyzer_dict = self.analyzer_dict
 
         if data is None:
             print("Warning: analyze_data() called with None input — skipping analysis.")
-            return None, {}
-
+            return None, {}, {}
+        
+        lineouts = {}
 
         if analyzer_dict.get('intensity_only', False):
             data_out = self.intensity_reconstruction(data)
@@ -114,22 +83,29 @@ class LongitudinalHTTAnalyzerHimg(WavefrontAnalyzer):
             )
             results['x0']    = x0
             results['y0']    = y0
-            results['x']    = x
-            results['y']    = y
-            results['x_lo'] = x_lo
-            results['y_lo'] = y_lo
+            lineouts['x']    = x
+            lineouts['y']    = y
+            lineouts['x_lo'] = x_lo
+            lineouts['y_lo'] = y_lo
             results['imshow_extent'] = self.get_imshow_extent(x,y)
 
-            return data_out, results
+            return data_out, results, lineouts
             
         else:
             # -----------------------------------------------------
             # Subtract Bg Phase
             # ----------------------------------------------------- 
-            slopes = wkpy.SlopesPostProcessor.apply_substractor(data, bg)
-            hasodata = wkpy.HasoData(hasoslopes=slopes)
-            phase = wkpy.Compute.phase_zonal(compute_phase_set=self.compute_phase_set_zonal, hasodata=hasodata)
-            data, pupil = phase.get_data()
+            if 'himg' in self.file_ext:
+                if bg is None:
+                    slopes = data
+                else:
+                    slopes = wkpy.SlopesPostProcessor.apply_substractor(data, bg)
+                hasodata = wkpy.HasoData(hasoslopes=slopes)
+                phase = wkpy.Compute.phase_zonal(compute_phase_set=self.compute_phase_set_zonal, hasodata=hasodata)
+                data, pupil = phase.get_data()
+            else:
+                if bg is not None:
+                    data = data - bg
 
             # -----------------------------------------------------
             # Convert to radians
@@ -254,3 +230,16 @@ class LongitudinalHTTAnalyzerHimg(WavefrontAnalyzer):
 
             return_dict = merge_dicts_overwrite(return_dict, phase_shifts, phase_shifts_bg)
             return data, return_dict
+        
+    def write_analyzed_data(self, data, analysis_dir, scan, shot_num):
+
+        # ---- intensity ----
+        append_info = '_intensity'
+        save_path = get_analysed_shot_save_path(
+            analysis_dir,
+            f'{self.output_diagnostic}{append_info}',
+            scan,
+            shot_num,
+            self.output_file_ext
+        )
+        super().write_analyzed_data(save_path, data)
